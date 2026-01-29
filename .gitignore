@@ -1,0 +1,25 @@
+# Data files (too large for git)
+*.csv
+
+# Progress tracking
+scrape_progress.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
