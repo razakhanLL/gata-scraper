@@ -459,7 +459,7 @@ async def worker(worker_id, queue, results_queue, tracker, browser):
     await page.close()
     await context.close()
 
-async def results_writer(results_queue, tracker, first_write):
+async def results_writer(results_queue, tracker, first_write, done_event):
     """
     Background task that writes results to the CSV file.
     
@@ -471,14 +471,15 @@ async def results_writer(results_queue, tracker, first_write):
         results_queue: Queue of scraped data waiting to be written
         tracker: Progress tracker to know when we're done
         first_write: True if starting fresh, False if resuming
+        done_event: Event that signals when scraping is complete
     """
     buffer = []         # Temporary storage for results
     rows_written = 0    # How many rows we've written so far
     
     while True:
         try:
-            # Wait for results from the scrapers
-            results = await asyncio.wait_for(results_queue.get(), timeout=2.0)
+            # Wait for results from the scrapers (with timeout so we can check done_event)
+            results = await asyncio.wait_for(results_queue.get(), timeout=0.5)
             buffer.extend(results)  # Add to buffer
             results_queue.task_done()
             
@@ -495,12 +496,12 @@ async def results_writer(results_queue, tracker, first_write):
                 buffer = []  # Clear the buffer
                 
         except asyncio.TimeoutError:
-            # If nothing to write and scraping is done, exit
-            if results_queue.empty() and tracker.processed >= tracker.total:
+            # Check if scraping is done and queue is empty
+            if done_event.is_set() and results_queue.empty():
                 break
             continue
     
-    # Write any remaining data in the buffer
+    # Write any remaining data in the buffer (CRITICAL for small runs!)
     if buffer:
         mode = 'w' if first_write and rows_written == 0 else 'a'
         with open(OUTPUT_FILE, mode, newline='', encoding='utf-8') as f:
@@ -508,6 +509,9 @@ async def results_writer(results_queue, tracker, first_write):
             if mode == 'w':
                 writer.writeheader()
             writer.writerows(buffer)
+        rows_written += len(buffer)
+    
+    return rows_written
 
 def load_grantee_list():
     """
@@ -605,6 +609,9 @@ async def main():
     queue = asyncio.Queue()          # Grantees waiting to be scraped
     results_queue = asyncio.Queue()  # Scraped data waiting to be written
     
+    # Create an event to signal when scraping is done
+    done_event = asyncio.Event()
+    
     # Fill the work queue with all grantees
     for g in grantees:
         await queue.put(g)
@@ -625,7 +632,7 @@ async def main():
         
         # Start the writer task (saves results to CSV)
         writer_task = asyncio.create_task(
-            results_writer(results_queue, tracker, first_write)
+            results_writer(results_queue, tracker, first_write, done_event)
         )
         
         # Start the progress saver (saves progress every 30 seconds)
@@ -640,7 +647,11 @@ async def main():
         # Wait for all grantees to be processed
         await queue.join()              # Wait for queue to empty
         await asyncio.gather(*workers)  # Wait for workers to finish
-        await results_queue.join()      # Wait for writer to finish
+        await results_queue.join()      # Wait for results to be queued
+        
+        # Signal writer that scraping is done, then wait for it to finish
+        done_event.set()
+        await writer_task  # Wait for writer to flush final buffer
         
         # Cancel the progress saver (we're done)
         saver_task.cancel()
